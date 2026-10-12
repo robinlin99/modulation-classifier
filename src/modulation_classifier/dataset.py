@@ -18,6 +18,46 @@ MODULATION_CLASSES = [
 ]
 
 
+def prepare_complex_data(data: np.ndarray) -> np.ndarray:
+    """Prepare I/Q data for complex-valued neural networks.
+    
+    Converts data from (N, 1024, 2) format to (N, 2, 1024, 1) format
+    where the first dimension represents real/imaginary channels.
+    
+    Args:
+        data: Input data of shape (N, 1024, 2) where last dim is [I, Q]
+        
+    Returns:
+        Reshaped data of shape (N, 2, 1024, 1) for complex processing
+    """
+    if data.ndim != 3 or data.shape[-1] != 2:
+        raise ValueError(f"Expected data shape (N, 1024, 2), got {data.shape}")
+    
+    # Transpose to (N, 2, 1024) and add width dimension
+    complex_data = data.transpose(0, 2, 1)  # (N, 2, 1024)
+    complex_data = complex_data[:, :, :, np.newaxis]  # (N, 2, 1024, 1)
+    
+    return complex_data
+
+
+def prepare_standard_data(data: np.ndarray) -> np.ndarray:
+    """Prepare I/Q data for standard real-valued neural networks.
+    
+    Converts data from (N, 1024, 2) to (N, 1, 1024, 2) format.
+    
+    Args:
+        data: Input data of shape (N, 1024, 2)
+        
+    Returns:  
+        Reshaped data of shape (N, 1, 1024, 2) for standard processing
+    """
+    if data.ndim != 3 or data.shape[-1] != 2:
+        raise ValueError(f"Expected data shape (N, 1024, 2), got {data.shape}")
+    
+    # Add channel dimension
+    return data[:, np.newaxis, :, :]  # (N, 1, 1024, 2)
+
+
 class IQDataset(Dataset):
     """PyTorch dataset for IQ modulation data."""
     
@@ -26,7 +66,8 @@ class IQDataset(Dataset):
         data: Union[str, np.ndarray], 
         labels: Optional[Union[str, np.ndarray]] = None,
         classes: List[str] = MODULATION_CLASSES,
-        transform: Optional[callable] = None
+        transform: Optional[callable] = None,
+        data_format: str = "standard"
     ):
         """Initialize IQ dataset.
         
@@ -35,15 +76,32 @@ class IQDataset(Dataset):
             labels: Path to CSV file or numpy array of labels (optional for test data)
             classes: List of modulation class names
             transform: Optional transform to apply to samples
+            data_format: Data format - "standard" for (N,1,T,2) or "complex" for (N,2,T,1)
         """
         self.classes = classes
         self.transform = transform
+        self.data_format = data_format
         
         # Load data
         if isinstance(data, str):
-            self.data = self._load_hdf5_data(data)
+            raw_data = self._load_hdf5_data(data)
         else:
-            self.data = data
+            raw_data = data
+            
+        # Store raw data for potential augmentation
+        self._raw_data = raw_data.copy()
+            
+        # Validate and format data
+        if len(raw_data.shape) != 3 or raw_data.shape[2] != 2:
+            raise ValueError(f"Expected data shape (N, T, 2), got {raw_data.shape}")
+            
+        # Apply data format transformation
+        if data_format == "complex":
+            self.data = prepare_complex_data(raw_data)
+        elif data_format == "standard":
+            self.data = prepare_standard_data(raw_data)
+        else:
+            raise ValueError(f"Unknown data format: {data_format}. Use 'standard' or 'complex'")
             
         # Load labels if provided
         if labels is not None:
@@ -53,10 +111,6 @@ class IQDataset(Dataset):
                 self.labels = labels
         else:
             self.labels = None
-            
-        # Validate data shape
-        if len(self.data.shape) != 3 or self.data.shape[2] != 2:
-            raise ValueError(f"Expected data shape (N, T, 2), got {self.data.shape}")
             
     def _load_hdf5_data(self, filepath: str) -> np.ndarray:
         """Load IQ data from HDF5 file."""
@@ -98,8 +152,8 @@ class IQDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Get a sample from the dataset."""
-        # Get IQ data and reshape for CNN: (T, 2) -> (1, T, 2)
-        sample = torch.from_numpy(self.data[idx]).unsqueeze(0).float()
+        # Data is already formatted by __init__, just convert to tensor
+        sample = torch.from_numpy(self.data[idx]).float()
         
         if self.transform:
             sample = self.transform(sample)
@@ -149,41 +203,50 @@ class IQAugmentation:
 def create_augmented_dataset(
     data: np.ndarray, 
     labels: np.ndarray, 
-    augmentation_factor: int = 2
+    augmentation_factor: int = 2,
+    methods: List[str] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Create augmented dataset with phase rotations.
+    """Create augmented dataset with various RF-specific augmentation methods.
     
     Args:
-        data: Original IQ data array
+        data: Original IQ data array (N, T, 2)
         labels: Original labels array  
         augmentation_factor: Number of augmented copies per sample
+        methods: List of augmentation methods to apply. Available:
+                ['rotation', 'amplitude', 'awgn', 'frequency_shift', 'time_shift', 'iq_imbalance']
         
     Returns:
         Tuple of (augmented_data, augmented_labels)
     """
+    if methods is None:
+        methods = ['rotation', 'amplitude', 'awgn']  # Default high-impact methods
+        
     print(f"Creating augmented dataset (factor={augmentation_factor})...", flush=True)
+    print(f"Using augmentation methods: {methods}", flush=True)
     
     augmented_data = [data]
     augmented_labels = [labels]
     
-    # Apply rotations
-    rotation_angles = [np.pi/2, np.pi, 3*np.pi/2]
+    # Define augmentation techniques
+    available_methods = {
+        'rotation': _apply_phase_rotation,
+        'amplitude': _apply_amplitude_scaling, 
+        'awgn': _apply_awgn,
+        'frequency_shift': _apply_frequency_shift,
+        'time_shift': _apply_time_shift,
+        'iq_imbalance': _apply_iq_imbalance
+    }
     
-    for i, angle in enumerate(rotation_angles[:augmentation_factor]):
-        print(f"Applying {angle*180/np.pi:.0f}° rotation...", flush=True)
-        
-        rotated_data = []
-        for sample in data:
-            # Rotation matrix for IQ data
-            cos_a, sin_a = np.cos(angle), np.sin(angle)
-            rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-            
-            # Apply rotation: (T, 2) @ (2, 2) -> (T, 2)  
-            rotated_sample = np.dot(sample, rot_matrix)
-            rotated_data.append(rotated_sample)
-            
-        augmented_data.append(np.array(rotated_data))
-        augmented_labels.append(labels.copy())
+    # Apply selected methods up to augmentation_factor
+    method_cycle = methods * ((augmentation_factor // len(methods)) + 1)
+    
+    for i in range(augmentation_factor):
+        method = method_cycle[i]
+        if method in available_methods:
+            print(f"Applying {method} augmentation...", flush=True)
+            augmented_sample = available_methods[method](data)
+            augmented_data.append(augmented_sample)
+            augmented_labels.append(labels.copy())
     
     # Concatenate all data
     final_data = np.concatenate(augmented_data, axis=0)
@@ -191,6 +254,104 @@ def create_augmented_dataset(
     
     print(f"Augmented dataset: {final_data.shape[0]} samples", flush=True)
     return final_data, final_labels
+
+
+def _apply_phase_rotation(data: np.ndarray, angles: List[float] = None) -> np.ndarray:
+    """Apply phase rotation to IQ data."""
+    if angles is None:
+        angles = [np.pi/2, np.pi, 3*np.pi/2]
+    
+    angle = np.random.choice(angles)
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    
+    rotated_data = []
+    for sample in data:
+        rotated_sample = np.dot(sample, rot_matrix)
+        rotated_data.append(rotated_sample)
+    
+    return np.array(rotated_data)
+
+
+def _apply_amplitude_scaling(data: np.ndarray, scale_range: Tuple[float, float] = (0.8, 1.2)) -> np.ndarray:
+    """Apply random amplitude scaling to simulate signal strength variations."""
+    scale_factor = np.random.uniform(scale_range[0], scale_range[1], size=(data.shape[0], 1, 1))
+    return data * scale_factor
+
+
+def _apply_awgn(data: np.ndarray, snr_db_range: Tuple[float, float] = (10, 20)) -> np.ndarray:
+    """Add Additive White Gaussian Noise (AWGN) to simulate channel effects."""
+    snr_db = np.random.uniform(snr_db_range[0], snr_db_range[1])
+    snr_linear = 10 ** (snr_db / 10)
+    
+    # Calculate signal power per sample
+    signal_power = np.mean(np.sum(data ** 2, axis=-1), axis=-1)  # Shape: (N,)
+    noise_power = signal_power / snr_linear  # Shape: (N,)
+    
+    # Generate noise with proper broadcasting
+    noise = np.random.normal(0, 1, data.shape)  # Standard normal noise
+    
+    # Scale noise by sqrt(noise_power/2) per sample
+    noise_std = np.sqrt(noise_power / 2)  # Shape: (N,)
+    noise_std = noise_std[:, np.newaxis, np.newaxis]  # Shape: (N, 1, 1) for broadcasting
+    
+    return data + noise * noise_std
+
+
+def _apply_frequency_shift(data: np.ndarray, max_shift: float = 0.1) -> np.ndarray:
+    """Apply frequency offset to simulate Doppler effects and oscillator drift."""
+    freq_shift = np.random.uniform(-max_shift, max_shift)
+    n_samples = data.shape[1]
+    
+    # Create frequency shift in complex domain
+    t = np.arange(n_samples)
+    freq_offset = np.exp(1j * 2 * np.pi * freq_shift * t)
+    
+    shifted_data = []
+    for sample in data:
+        # Convert to complex, apply shift, convert back
+        complex_signal = sample[:, 0] + 1j * sample[:, 1]
+        shifted_complex = complex_signal * freq_offset
+        shifted_sample = np.column_stack([shifted_complex.real, shifted_complex.imag])
+        shifted_data.append(shifted_sample)
+    
+    return np.array(shifted_data)
+
+
+def _apply_time_shift(data: np.ndarray, max_shift_samples: int = None) -> np.ndarray:
+    """Apply circular time shift to simulate timing synchronization errors."""
+    if max_shift_samples is None:
+        max_shift_samples = min(64, data.shape[1] // 8)  # Max 8% of signal length
+    
+    shift_samples = np.random.randint(-max_shift_samples, max_shift_samples + 1)
+    
+    shifted_data = []
+    for sample in data:
+        shifted_sample = np.roll(sample, shift_samples, axis=0)
+        shifted_data.append(shifted_sample)
+    
+    return np.array(shifted_data)
+
+
+def _apply_iq_imbalance(data: np.ndarray, gain_range: Tuple[float, float] = (0.9, 1.1),
+                       phase_range: Tuple[float, float] = (-0.1, 0.1)) -> np.ndarray:
+    """Apply IQ imbalance to simulate hardware imperfections."""
+    gain_imbalance = np.random.uniform(gain_range[0], gain_range[1])
+    phase_imbalance = np.random.uniform(phase_range[0], phase_range[1])
+    
+    imbalanced_data = []
+    for sample in data:
+        i_channel = sample[:, 0]
+        q_channel = sample[:, 1] * gain_imbalance
+        
+        # Apply phase imbalance
+        q_channel_imbalanced = (q_channel * np.cos(phase_imbalance) + 
+                               i_channel * np.sin(phase_imbalance))
+        
+        imbalanced_sample = np.column_stack([i_channel, q_channel_imbalanced])
+        imbalanced_data.append(imbalanced_sample)
+    
+    return np.array(imbalanced_data)
 
 
 def create_data_loaders(
@@ -232,8 +393,22 @@ def create_data_loaders(
     val_data = dataset.data[val_idx]
     val_labels = dataset.labels[val_idx]
     
-    train_dataset = IQDataset(train_data, train_labels, dataset.classes)
-    val_dataset = IQDataset(val_data, val_labels, dataset.classes)
+    # Create datasets with raw data already formatted
+    train_dataset = IQDataset.__new__(IQDataset)
+    train_dataset.classes = dataset.classes
+    train_dataset.transform = dataset.transform
+    train_dataset.data_format = dataset.data_format
+    train_dataset.data = train_data
+    train_dataset.labels = train_labels
+    train_dataset._raw_data = None  # Not needed for subsets
+    
+    val_dataset = IQDataset.__new__(IQDataset)
+    val_dataset.classes = dataset.classes
+    val_dataset.transform = dataset.transform
+    val_dataset.data_format = dataset.data_format
+    val_dataset.data = val_data
+    val_dataset.labels = val_labels
+    val_dataset._raw_data = None  # Not needed for subsets
     
     # Create data loaders
     train_loader = DataLoader(
