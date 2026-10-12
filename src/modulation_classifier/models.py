@@ -5,6 +5,115 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
 
+from .complex_layers import (
+    ComplexConv2d, ComplexBatchNorm2d, ComplexReLU, ComplexModulus, 
+    complex_adaptive_avg_pool2d
+)
+
+
+class ComplexNet(nn.Module):
+    """Complex-valued CNN for modulation classification.
+    
+    Uses complex convolutions to properly process I/Q data as complex numbers,
+    capturing joint correlations between in-phase and quadrature components
+    that are lost in real-valued networks.
+    
+    Input is a batch of IQ frames shaped ``(N, 2, T, 1)`` where the 2 channels
+    represent real and imaginary parts. Output is ``(N, num_classes)`` logits.
+    
+    Architecture:
+        complex_conv1  1 -> 128   kernel (3, 1)   + BN + ComplexReLU
+        complex_conv2  128 -> 128 kernel (3, 1)   + BN + ComplexReLU  
+        complex_conv3  128 -> 64  kernel (3, 1)   + BN + ComplexReLU
+        complex_conv4  64 -> 32   kernel (3, 1)   + BN + ComplexReLU
+        modulus (converts to real) -> 32 channels
+        global average pool -> 32
+        dropout -> fc1 32 -> 64 + ReLU -> fc2 64 -> num_classes
+    
+    Args:
+        num_classes: Number of output classes
+        dropout: Dropout probability applied before classifier
+    """
+    
+    def __init__(self, num_classes: int = 10, dropout: float = 0.5):
+        super(ComplexNet, self).__init__()
+        
+        # Complex convolutional layers
+        self.complex_conv1 = ComplexConv2d(1, 128, kernel_size=(3, 1), stride=1, padding=(1, 0))
+        self.complex_bn1 = ComplexBatchNorm2d(128)
+        
+        self.complex_conv2 = ComplexConv2d(128, 128, kernel_size=(3, 1), stride=1, padding=(1, 0))
+        self.complex_bn2 = ComplexBatchNorm2d(128)
+        
+        self.complex_conv3 = ComplexConv2d(128, 64, kernel_size=(3, 1), stride=1, padding=(1, 0))
+        self.complex_bn3 = ComplexBatchNorm2d(64)
+        
+        self.complex_conv4 = ComplexConv2d(64, 32, kernel_size=(3, 1), stride=1, padding=(1, 0))
+        self.complex_bn4 = ComplexBatchNorm2d(32)
+        
+        # Complex activation and modulus
+        self.complex_relu = ComplexReLU()
+        self.modulus = ComplexModulus()
+        
+        # Real-valued classifier head
+        self.dropout = nn.Dropout(p=dropout)
+        self.fc1 = nn.Linear(32, 64)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass for complex CNN.
+        
+        Args:
+            x: Input tensor of shape (batch_size, 2, 1024, 1) where
+               x[:, 0] = real part (I), x[:, 1] = imaginary part (Q)
+               
+        Returns:
+            Output logits of shape (batch_size, num_classes)
+        """
+        # Complex convolutional layers
+        x = self.complex_relu(self.complex_bn1(self.complex_conv1(x)))
+        x = self.complex_relu(self.complex_bn2(self.complex_conv2(x)))
+        x = self.complex_relu(self.complex_bn3(self.complex_conv3(x)))
+        x = self.complex_relu(self.complex_bn4(self.complex_conv4(x)))
+        
+        # Convert to real-valued via modulus
+        x = self.modulus(x)
+        
+        # Global average pooling
+        x = F.adaptive_avg_pool2d(x, (1, 1))
+        x = x.view(x.size(0), -1)
+        
+        # Real-valued classifier
+        x = self.dropout(F.relu(self.fc1(x)))
+        x = self.fc2(x)
+        
+        return x
+    
+    def get_complex_feature_maps(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Get complex-valued intermediate feature maps for analysis.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            List of complex feature maps from each layer (before modulus)
+        """
+        features = []
+        
+        x = self.complex_relu(self.complex_bn1(self.complex_conv1(x)))
+        features.append(x)
+        
+        x = self.complex_relu(self.complex_bn2(self.complex_conv2(x)))
+        features.append(x)
+        
+        x = self.complex_relu(self.complex_bn3(self.complex_conv3(x)))
+        features.append(x)
+        
+        x = self.complex_relu(self.complex_bn4(self.complex_conv4(x)))
+        features.append(x)
+        
+        return features
+
 
 class ImprovedNet(nn.Module):
     """Default CNN for modulation classification (the ``"improved"`` architecture).
@@ -162,7 +271,7 @@ def create_model(
     """Factory function to create models.
     
     Args:
-        architecture: Model architecture ("improved" or "legacy")
+        architecture: Model architecture ("improved", "complex", or "legacy")
         num_classes: Number of output classes
         **kwargs: Additional arguments passed to model constructor
         
@@ -171,10 +280,12 @@ def create_model(
     """
     if architecture == "improved":
         return ImprovedNet(num_classes=num_classes, **kwargs)
+    elif architecture == "complex":
+        return ComplexNet(num_classes=num_classes, **kwargs)
     elif architecture == "legacy":
         return LegacyNet(num_classes=num_classes, **kwargs)
     else:
-        raise ValueError(f"Unknown architecture: {architecture}")
+        raise ValueError(f"Unknown architecture: {architecture}. Choose from: 'improved', 'complex', 'legacy'")
 
 
 def count_parameters(model: nn.Module) -> int:

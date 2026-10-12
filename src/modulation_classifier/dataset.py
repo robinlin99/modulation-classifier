@@ -18,6 +18,46 @@ MODULATION_CLASSES = [
 ]
 
 
+def prepare_complex_data(data: np.ndarray) -> np.ndarray:
+    """Prepare I/Q data for complex-valued neural networks.
+    
+    Converts data from (N, 1024, 2) format to (N, 2, 1024, 1) format
+    where the first dimension represents real/imaginary channels.
+    
+    Args:
+        data: Input data of shape (N, 1024, 2) where last dim is [I, Q]
+        
+    Returns:
+        Reshaped data of shape (N, 2, 1024, 1) for complex processing
+    """
+    if data.ndim != 3 or data.shape[-1] != 2:
+        raise ValueError(f"Expected data shape (N, 1024, 2), got {data.shape}")
+    
+    # Transpose to (N, 2, 1024) and add width dimension
+    complex_data = data.transpose(0, 2, 1)  # (N, 2, 1024)
+    complex_data = complex_data[:, :, :, np.newaxis]  # (N, 2, 1024, 1)
+    
+    return complex_data
+
+
+def prepare_standard_data(data: np.ndarray) -> np.ndarray:
+    """Prepare I/Q data for standard real-valued neural networks.
+    
+    Converts data from (N, 1024, 2) to (N, 1, 1024, 2) format.
+    
+    Args:
+        data: Input data of shape (N, 1024, 2)
+        
+    Returns:  
+        Reshaped data of shape (N, 1, 1024, 2) for standard processing
+    """
+    if data.ndim != 3 or data.shape[-1] != 2:
+        raise ValueError(f"Expected data shape (N, 1024, 2), got {data.shape}")
+    
+    # Add channel dimension
+    return data[:, np.newaxis, :, :]  # (N, 1, 1024, 2)
+
+
 class IQDataset(Dataset):
     """PyTorch dataset for IQ modulation data."""
     
@@ -26,7 +66,8 @@ class IQDataset(Dataset):
         data: Union[str, np.ndarray], 
         labels: Optional[Union[str, np.ndarray]] = None,
         classes: List[str] = MODULATION_CLASSES,
-        transform: Optional[callable] = None
+        transform: Optional[callable] = None,
+        data_format: str = "standard"
     ):
         """Initialize IQ dataset.
         
@@ -35,15 +76,32 @@ class IQDataset(Dataset):
             labels: Path to CSV file or numpy array of labels (optional for test data)
             classes: List of modulation class names
             transform: Optional transform to apply to samples
+            data_format: Data format - "standard" for (N,1,T,2) or "complex" for (N,2,T,1)
         """
         self.classes = classes
         self.transform = transform
+        self.data_format = data_format
         
         # Load data
         if isinstance(data, str):
-            self.data = self._load_hdf5_data(data)
+            raw_data = self._load_hdf5_data(data)
         else:
-            self.data = data
+            raw_data = data
+            
+        # Store raw data for potential augmentation
+        self._raw_data = raw_data.copy()
+            
+        # Validate and format data
+        if len(raw_data.shape) != 3 or raw_data.shape[2] != 2:
+            raise ValueError(f"Expected data shape (N, T, 2), got {raw_data.shape}")
+            
+        # Apply data format transformation
+        if data_format == "complex":
+            self.data = prepare_complex_data(raw_data)
+        elif data_format == "standard":
+            self.data = prepare_standard_data(raw_data)
+        else:
+            raise ValueError(f"Unknown data format: {data_format}. Use 'standard' or 'complex'")
             
         # Load labels if provided
         if labels is not None:
@@ -53,10 +111,6 @@ class IQDataset(Dataset):
                 self.labels = labels
         else:
             self.labels = None
-            
-        # Validate data shape
-        if len(self.data.shape) != 3 or self.data.shape[2] != 2:
-            raise ValueError(f"Expected data shape (N, T, 2), got {self.data.shape}")
             
     def _load_hdf5_data(self, filepath: str) -> np.ndarray:
         """Load IQ data from HDF5 file."""
@@ -98,8 +152,8 @@ class IQDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Get a sample from the dataset."""
-        # Get IQ data and reshape for CNN: (T, 2) -> (1, T, 2)
-        sample = torch.from_numpy(self.data[idx]).unsqueeze(0).float()
+        # Data is already formatted by __init__, just convert to tensor
+        sample = torch.from_numpy(self.data[idx]).float()
         
         if self.transform:
             sample = self.transform(sample)
@@ -232,8 +286,22 @@ def create_data_loaders(
     val_data = dataset.data[val_idx]
     val_labels = dataset.labels[val_idx]
     
-    train_dataset = IQDataset(train_data, train_labels, dataset.classes)
-    val_dataset = IQDataset(val_data, val_labels, dataset.classes)
+    # Create datasets with raw data already formatted
+    train_dataset = IQDataset.__new__(IQDataset)
+    train_dataset.classes = dataset.classes
+    train_dataset.transform = dataset.transform
+    train_dataset.data_format = dataset.data_format
+    train_dataset.data = train_data
+    train_dataset.labels = train_labels
+    train_dataset._raw_data = None  # Not needed for subsets
+    
+    val_dataset = IQDataset.__new__(IQDataset)
+    val_dataset.classes = dataset.classes
+    val_dataset.transform = dataset.transform
+    val_dataset.data_format = dataset.data_format
+    val_dataset.data = val_data
+    val_dataset.labels = val_labels
+    val_dataset._raw_data = None  # Not needed for subsets
     
     # Create data loaders
     train_loader = DataLoader(

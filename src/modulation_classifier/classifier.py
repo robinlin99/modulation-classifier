@@ -49,7 +49,7 @@ class ModulationClassifier:
         """Initialize the classifier.
         
         Args:
-            model_architecture: Model architecture to use ("improved" or "legacy")
+            model_architecture: Model architecture ("improved", "complex", or "legacy")
             num_classes: Number of modulation classes
             classes: List of class names
             device: Device to use ("cuda", "mps", "cpu", or None for auto-detect)
@@ -57,6 +57,9 @@ class ModulationClassifier:
         self.classes = classes
         self.num_classes = num_classes
         self.model_architecture = model_architecture
+        
+        # Determine if we need complex data format
+        self.use_complex_format = (model_architecture == "complex")
         
         # Set device
         if device is None:
@@ -128,18 +131,55 @@ class ModulationClassifier:
         
         # Load dataset if path provided
         if isinstance(dataset, str):
-            dataset = IQDataset(dataset, labels_path, self.classes)
+            # Load raw data first (before format conversion)
+            raw_dataset = IQDataset(dataset, labels_path, self.classes, data_format="standard")
+            
+            # Apply data augmentation to raw format if requested
+            if use_augmentation:
+                print("Applying data augmentation...", flush=True)
+                # Get original format data (N, T, 2) for augmentation
+                if hasattr(raw_dataset, '_raw_data'):
+                    orig_data = raw_dataset._raw_data
+                else:
+                    # Convert back from standard format (N, 1, T, 2) to (N, T, 2)
+                    orig_data = raw_dataset.data[:, 0, :, :]
+                
+                aug_data, aug_labels = create_augmented_dataset(
+                    orig_data, raw_dataset.labels, augmentation_factor
+                )
+                
+                # Now apply the correct format transformation
+                data_format = "complex" if self.use_complex_format else "standard"
+                dataset = IQDataset(aug_data, aug_labels, self.classes, data_format=data_format)
+            else:
+                # No augmentation, just convert format
+                data_format = "complex" if self.use_complex_format else "standard"
+                dataset = IQDataset(dataset, labels_path, self.classes, data_format=data_format)
+        else:
+            # Dataset object provided
+            if use_augmentation:
+                print("Applying data augmentation...", flush=True)
+                # Need to get original format for augmentation
+                if hasattr(dataset, '_raw_data'):
+                    orig_data = dataset._raw_data
+                else:
+                    # Try to convert from current format back to original
+                    if dataset.data_format == "standard":
+                        orig_data = dataset.data[:, 0, :, :]  # (N, 1, T, 2) -> (N, T, 2)
+                    elif dataset.data_format == "complex":
+                        # (N, 2, T, 1) -> (N, T, 2)
+                        orig_data = np.stack([dataset.data[:, 0, :, 0], dataset.data[:, 1, :, 0]], axis=-1)
+                    else:
+                        raise ValueError(f"Unknown data format: {dataset.data_format}")
+                
+                aug_data, aug_labels = create_augmented_dataset(
+                    orig_data, dataset.labels, augmentation_factor
+                )
+                data_format = "complex" if self.use_complex_format else "standard"
+                dataset = IQDataset(aug_data, aug_labels, self.classes, data_format=data_format)
             
         if dataset.labels is None:
             raise ValueError("Dataset must have labels for training")
-            
-        # Apply data augmentation
-        if use_augmentation:
-            print("Applying data augmentation...", flush=True)
-            aug_data, aug_labels = create_augmented_dataset(
-                dataset.data, dataset.labels, augmentation_factor
-            )
-            dataset = IQDataset(aug_data, aug_labels, self.classes)
             
         # Create data loaders
         train_loader, val_loader = create_data_loaders(

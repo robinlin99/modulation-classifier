@@ -67,8 +67,8 @@ def build_train_parser() -> argparse.ArgumentParser:
     
     # Model arguments
     parser.add_argument('--architecture', type=str, default='improved',
-                       choices=['improved', 'legacy'],
-                       help='Model architecture (default: improved)')
+                       choices=['improved', 'complex', 'legacy'],
+                       help='Model architecture: improved (real-valued CNN), complex (complex-valued CNN), legacy (original)')
     parser.add_argument('--device', type=str, default=None,
                        choices=['cpu', 'cuda', 'mps'],
                        help='Device to use (default: auto-detect cuda > mps > cpu)')
@@ -197,8 +197,8 @@ def build_predict_parser() -> argparse.ArgumentParser:
     parser.add_argument('--model', type=str, required=True,
                        help='Path to trained model file')
     parser.add_argument('--architecture', type=str, default='improved',
-                       choices=['improved', 'legacy'],
-                       help='Model architecture (default: improved)')
+                       choices=['improved', 'complex', 'legacy'],
+                       help='Model architecture: improved (real-valued CNN), complex (complex-valued CNN), legacy (original)')
     
     # Data arguments
     parser.add_argument('--data', type=str, required=True,
