@@ -173,7 +173,8 @@ class ModulationClassifier:
                         raise ValueError(f"Unknown data format: {dataset.data_format}")
                 
                 aug_data, aug_labels = create_augmented_dataset(
-                    orig_data, dataset.labels, augmentation_factor
+                    orig_data, dataset.labels, augmentation_factor,
+                    methods=['rotation', 'amplitude', 'awgn', 'time_shift']  # Enhanced methods
                 )
                 data_format = "complex" if self.use_complex_format else "standard"
                 dataset = IQDataset(aug_data, aug_labels, self.classes, data_format=data_format)
