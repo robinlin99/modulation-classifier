@@ -56,10 +56,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/robinzl/modulation-classifier"
-Repository = "https://github.com/robinzl/modulation-classifier"
-Documentation = "https://github.com/robinzl/modulation-classifier/tree/main/docs"
-"Bug Tracker" = "https://github.com/robinzl/modulation-classifier/issues"
+Homepage = "https://github.com/robinlin99/modulation-classifier"
+Repository = "https://github.com/robinlin99/modulation-classifier"
+Documentation = "https://github.com/robinlin99/modulation-classifier/tree/main/docs"
+"Bug Tracker" = "https://github.com/robinlin99/modulation-classifier/issues"
 
 [project.scripts]
 modulation-train = "modulation_classifier.cli:train_cli"

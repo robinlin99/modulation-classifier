@@ -20,7 +20,7 @@ troubleshooting). Section links below point at the Markdown sources.
 ### 1. Install
 
 ```bash
-git clone https://github.com/robinzl/modulation-classifier.git
+git clone https://github.com/robinlin99/modulation-classifier.git
 cd modulation-classifier
 python3 -m venv venv && source venv/bin/activate
 pip install -e .
