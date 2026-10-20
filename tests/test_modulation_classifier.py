@@ -11,6 +11,7 @@ from modulation_classifier import (
     ModulationClassifier,
     IQDataset, 
     ImprovedNet,
+    ComplexNet,
     create_model,
     count_parameters
 )
@@ -42,6 +43,10 @@ class TestModels:
         model = create_model("improved", num_classes=8)
         assert isinstance(model, ImprovedNet)
         
+        # Test complex model
+        model = create_model("complex", num_classes=8)
+        assert isinstance(model, ComplexNet)
+        
         # Test invalid architecture
         with pytest.raises(ValueError):
             create_model("invalid_arch")
@@ -64,11 +69,18 @@ class TestDataset:
         data = np.random.randn(n_samples, n_timesteps, 2)
         labels = np.random.randint(0, 10, n_samples)
         
+        # Test default standard format
         dataset = IQDataset(data, labels, MODULATION_CLASSES)
         
         assert len(dataset) == n_samples
-        assert dataset.data.shape == (n_samples, n_timesteps, 2)
+        assert dataset.data.shape == (n_samples, 1, n_timesteps, 2)  # Standard format: (N,1,T,2)
         assert len(dataset.labels) == n_samples
+        assert dataset.data_format == "standard"
+        
+        # Test complex format
+        dataset_complex = IQDataset(data, labels, MODULATION_CLASSES, data_format="complex")
+        assert dataset_complex.data.shape == (n_samples, 2, n_timesteps, 1)  # Complex format: (N,2,T,1)
+        assert dataset_complex.data_format == "complex"
         
     def test_iq_dataset_getitem(self):
         """Test dataset __getitem__ method."""
@@ -76,13 +88,19 @@ class TestDataset:
         data = np.random.randn(n_samples, n_timesteps, 2)
         labels = np.random.randint(0, 10, n_samples)
         
+        # Test standard format
         dataset = IQDataset(data, labels, MODULATION_CLASSES)
         
         # Test getting item with labels
         sample, label = dataset[0]
-        assert sample.shape == (1, n_timesteps, 2)  # Added channel dimension
+        assert sample.shape == (1, n_timesteps, 2)  # Standard format: (1, T, 2)
         assert isinstance(sample, torch.Tensor)
         assert isinstance(label, torch.Tensor)
+        
+        # Test complex format
+        dataset_complex = IQDataset(data, labels, MODULATION_CLASSES, data_format="complex")
+        sample_complex, label_complex = dataset_complex[0]
+        assert sample_complex.shape == (2, n_timesteps, 1)  # Complex format: (2, T, 1)
         
         # Test dataset without labels
         dataset_no_labels = IQDataset(data, classes=MODULATION_CLASSES)
